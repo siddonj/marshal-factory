@@ -13,6 +13,9 @@ const { values: args } = parseArgs({
     port: { type: "string", default: "3456" },
     "no-open": { type: "boolean", default: false },
     force: { type: "boolean", default: false },
+    /** GitHub App names are global, so each factory owner registers their own. */
+    name: { type: "string", default: "marshal-factory-ski043" },
+    homepage: { type: "string", default: "https://github.com/ski043/marshal-factory" },
   },
 });
 if (existsSync(".env.local")) process.loadEnvFile(".env.local");
@@ -24,8 +27,8 @@ const base = `http://localhost:${args.port}`;
 let state: string | undefined = randomBytes(16).toString("hex");
 
 const manifest = {
-  name: "marshal-factory-ski043",
-  url: "https://github.com/ski043/marshal-factory",
+  name: args.name,
+  url: args.homepage,
   hook_attributes: { url: `${ingestBase}/webhooks/github`, active: true },
   redirect_url: `${base}/callback`,
   setup_url: `${base}/installed`,
@@ -128,4 +131,8 @@ await serve(Number(args.port), async (request) => {
 });
 
 console.log(`open ${base}/ to create the GitHub App`);
-if (!args["no-open"]) execFile("open", [`${base}/`]);
+// On a headless server, forward the port from a machine with a browser: ssh -L 3456:localhost:3456 <server>
+const opener = process.platform === "darwin" ? "open" : "xdg-open";
+if (!args["no-open"]) execFile(opener, [`${base}/`], (error) => {
+  if (error) console.log(`no browser here (${opener} failed); forward the port with ssh -L ${args.port}:localhost:${args.port} <this host> and open ${base}/ there`);
+});
