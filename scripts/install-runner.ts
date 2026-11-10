@@ -4,7 +4,9 @@ import { homedir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 
 // Installs the runner as a launchd LaunchAgent: started at login, restarted when it exits, logging
-// to ~/Library/Logs/marshal-factory/runner.log. Re-running with nothing changed leaves it alone.
+// to ~/Library/Logs/marshal-factory/runner.log. On Linux it is the systemd user service
+// marshal-factory-runner.service instead, logging to ~/.local/state/marshal-factory/runner.log.
+// Re-running with nothing changed leaves it alone.
 //   bun scripts/install-runner.ts [--uninstall]
 
 export const LABEL = "com.marshal-factory.runner";
@@ -23,6 +25,50 @@ const loaded = () => {
     return false;
   }
 };
+
+if (process.platform === "linux") {
+  // Linux: a systemd user service instead of a LaunchAgent. Needs lingering (loginctl enable-linger) to run without a login.
+  const unit = "marshal-factory-runner.service";
+  const unitPath = join(homedir(), ".config/systemd/user", unit);
+  const linuxLog = join(homedir(), ".local/state/marshal-factory/runner.log");
+  const systemctl = (...args: string[]) => execFileSync("systemctl", ["--user", ...args], { encoding: "utf8", stdio: "pipe" });
+  if (process.argv.includes("--uninstall")) {
+    try { systemctl("disable", "--now", unit); } catch {}
+    console.log(`stopped   ${unit}; ${unitPath} left in place`);
+    process.exit(0);
+  }
+  const bun = which("bun");
+  const t3 = process.env.T3CODE_CLI_PATH ?? [join(homedir(), ".t3/bin/t3")].find(existsSync) ?? which("t3");
+  const tools = ["bun", "git", "gh", "node", "claude", "modal"].flatMap((b) => { try { return [which(b)]; } catch { return []; } });
+  const path = [...new Set([...tools.map(dirname), dirname(t3), "/usr/local/bin", "/usr/bin", "/bin"])].join(":");
+  const service = `[Unit]
+Description=marshal-factory runner
+After=network-online.target
+
+[Service]
+ExecStart=${bun} ${join(root, "runner/index.ts")}
+WorkingDirectory=${root}
+Environment=PATH=${path}
+Environment=HOME=${homedir()}
+Environment=T3CODE_CLI_PATH=${t3}
+Restart=always
+RestartSec=10
+StandardOutput=append:${linuxLog}
+StandardError=append:${linuxLog}
+
+[Install]
+WantedBy=default.target
+`;
+  mkdirSync(dirname(unitPath), { recursive: true });
+  mkdirSync(dirname(linuxLog), { recursive: true });
+  const changed = !existsSync(unitPath) || readFileSync(unitPath, "utf8") !== service;
+  if (changed) writeFileSync(unitPath, service);
+  systemctl("daemon-reload");
+  systemctl("enable", unit);
+  systemctl(changed ? "restart" : "start", unit);
+  console.log(`${changed ? "installed" : "unchanged"} ${unit}; log ${linuxLog}`);
+  process.exit(0);
+}
 
 if (process.argv.includes("--uninstall")) {
   if (loaded()) launchctl("bootout", `${domain}/${LABEL}`);
