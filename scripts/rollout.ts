@@ -150,7 +150,7 @@ async function afterPull() {
   const ingestTouched = ingestChanged && touchedInputs(ingestChanged, bundleInputs(["functions/ingest/index.ts"]));
   if (ingestTouched === null) log("ingest: no earlier rollout to compare with, so it is deployed");
   else if (ingestTouched.length > 0) log(`ingest: ${ingestTouched.join(", ")} changed`);
-  if (ingestTouched === null || ingestTouched.length > 0) run("neon", ["functions", "deploy", "ingest", "--branch", "main", "--src", "functions/ingest/index.ts"]);
+  if (ingestTouched === null || ingestTouched.length > 0) run("neon", ["functions", "deploy", "ingest", "--branch", process.env.NEON_BRANCH || "main", "--src", "functions/ingest/index.ts"]);
   else log("ingest: unchanged since the last rollout, not deployed");
 
   const image = readSandboxImage();
