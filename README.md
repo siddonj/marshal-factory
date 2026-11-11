@@ -68,12 +68,12 @@ If your team key or label differs, set them in every place listed under [Setting
 
 ### 4. Create the Neon backend
 
-Create a project, link this checkout to it, and turn on Realtime for `main`:
+Create a project, link this checkout to it, and turn on Realtime for its default branch. New Neon projects name that branch `production`, which the commands below use. On an older project whose default branch is `main`, put `main` in their place; `neon branches list` shows the name.
 
 ```sh
 neon projects create --name marshal-factory
 neon init --no-agent-setup      # links this directory to the project; writes .neon
-neon realtime enable --branch main --allowed-origin '*'
+neon realtime enable --branch production --allowed-origin '*'
 ```
 
 Create `.env.local` with the secrets you choose yourself:
@@ -91,16 +91,16 @@ EOF
 chmod 600 .env.local
 ```
 
-Deploy `neon.ts` to `main`, which turns on Neon Auth and deploys the ingest Function. The GitHub App doesn't exist yet, so pass a placeholder for its webhook secret. Step 6 replaces it.
+Deploy `neon.ts` to `production`, which turns on Neon Auth and deploys the ingest Function. The GitHub App doesn't exist yet, so pass a placeholder for its webhook secret. Step 6 replaces it.
 
 ```sh
-GITHUB_APP_WEBHOOK_SECRET=pending neon deploy --branch main --env .env.local --no-env-pull
+GITHUB_APP_WEBHOOK_SECRET=pending neon deploy --branch production --env .env.local --no-env-pull
 ```
 
 Pull the values Neon generated (connection strings, Auth, Realtime, and the Function's URL), then create the tables:
 
 ```sh
-neon env pull --branch main
+neon env pull --branch production
 echo "NEXT_PUBLIC_NEON_REALTIME_URL=$(grep '^NEON_REALTIME_URL=' .env.local | cut -d= -f2-)" >> .env.local
 bun run db:migrate
 ```
@@ -137,7 +137,7 @@ A browser page opens and sends the app manifest to GitHub. Click **Create GitHub
 Now give the ingest Function the real webhook secret:
 
 ```sh
-neon functions deploy ingest --branch main --src functions/ingest/index.ts \
+neon functions deploy ingest --branch production --src functions/ingest/index.ts \
   --env GITHUB_APP_WEBHOOK_SECRET="$(jq -r .webhook_secret ~/.config/marshal-factory/github-app.json)"
 ```
 
@@ -168,7 +168,7 @@ Import the repo into Vercel as a Next.js project. `vercel.json` already sets the
 Deploy, then add the panel's production URL to Neon Auth's trusted domains; the example uses `https://marshal-factory.vercel.app`, so put your own domain in its place. A new branch has none, and without this sign-up fails with "Create account failed: Invalid origin.":
 
 ```sh
-neon neon-auth domain add https://marshal-factory.vercel.app --branch main
+neon neon-auth domain add https://marshal-factory.vercel.app --branch production
 ```
 
 Then create your owner account. Sign-up is off by default. The [owner account steps](docs/operations.md#panel-access-and-deploys) turn it on briefly, so you can register with an address from `FACTORY_OWNER_EMAILS` and confirm it with the emailed code.
@@ -304,7 +304,7 @@ It waits for Vercel's production deploy (which runs the migrations), stops the r
 - **Start with the runner log**: `~/Library/Logs/marshal-factory/runner.log`. Each line is one JSON event. Errors name the step that failed.
 - **An issue isn't picked up.** Check that it is in your team (`teamKey`), has the label, and is in an unstarted state such as Todo. Also check that **Repositories** lists at least one repo or `factory.repos` isn't empty, and that the Linear webhook exists under Linear → Settings → API. The runner also polls every 90 seconds, so a missed webhook only delays the job.
 - **Machine shows offline.** The runner isn't sending heartbeats. Check `launchctl list | grep marshal-factory`, then the log. Run `bun runner/index.ts --once` in the live checkout to do one pass by hand and see its output.
-- **Sign-up fails with "Invalid origin."** Neon Auth only accepts sign-ups from its trusted domains, and the panel's domain isn't one of them. Run `neon neon-auth domain add https://<your panel domain> --branch main`, then sign up again. See [the owner account steps](docs/operations.md#panel-access-and-deploys).
+- **Sign-up fails with "Invalid origin."** Neon Auth only accepts sign-ups from its trusted domains, and the panel's domain isn't one of them. Run `neon neon-auth domain add https://<your panel domain> --branch production`, then sign up again. See [the owner account steps](docs/operations.md#panel-access-and-deploys).
 - **The board has no live updates.** Check the three Realtime variables in Vercel. Previews never subscribe to live updates; only production does.
 - **A run has no stages or costs.** The target repo's hooks aren't reaching ingest. Check that the files from `install-target` are on the repo's `main`, and that `secret` in your config equals `FACTORY_INGEST_SECRET` in the Function.
 - **You moved the live checkout.** The hooks and the LaunchAgent hold its old path. Run `install-target` for each repo and `install-runner` again.
@@ -312,7 +312,7 @@ It waits for Vercel's production deploy (which runs the migrations), stops the r
 
 ## Developing
 
-Work in a separate clone or worktree, never in the live checkout. Run `bun dev` for the panel against a Neon branch of your own, not `main`.
+Work in a separate clone or worktree, never in the live checkout. Run `bun dev` for the panel against a Neon branch of your own, not `production`.
 
 `bun run test:regressions` runs every `scripts/*-regressions.ts` against a throwaway Neon branch made from production. It deletes the branch when the run ends. Pass a prefix to run a subset, for example `bun run test:regressions ingest`. During a test run, the real Linear client, the GitHub App and `t3` commands refuse to run, so a test can't touch real work.
 
