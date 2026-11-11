@@ -27,9 +27,9 @@ Accounts:
 - **Vercel**, for the panel.
 - Optional: **Modal**, to run jobs in cloud sandboxes ([Running jobs in Modal sandboxes](#running-jobs-in-modal-sandboxes)), and **Slack**, for notifications and acting from Slack ([Connecting Slack](#connecting-slack)).
 
-On the Mac that runs the factory:
+On the machine that runs the factory:
 
-- macOS. The runner installs as a launchd agent and identifies the Mac by its hardware UUID.
+- macOS or Linux. On macOS the runner installs as a launchd agent and identifies the Mac by its hardware UUID. On Linux it installs as the systemd user service `marshal-factory-runner.service` and identifies the machine by `/etc/machine-id`.
 - [Bun](https://bun.sh), git, and the [GitHub CLI](https://cli.github.com) signed in (`gh auth login`). Threads push branches and open PRs with your own git and `gh` credentials.
 - Claude Code with the PStack plugin installed.
 - T3 Code, running, with its `t3` command line tool. The installer looks for it at `~/.t3/bin/t3`, then on your `PATH`, or you can set `T3CODE_CLI_PATH`.
