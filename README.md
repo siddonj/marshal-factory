@@ -182,6 +182,8 @@ tail -f ~/Library/Logs/marshal-factory/runner.log
 
 This installs the LaunchAgent `com.marshal-factory.runner`. It starts at login and restarts if it exits. Within a minute the log shows `realtime` `live` and a `heartbeat`, and your Mac appears under **Machines** in the panel. The runner still needs a repo to work in, which the next section adds.
 
+On Linux, `bun scripts/install-runner.ts` installs the systemd user service `marshal-factory-runner.service` instead, which logs to `~/.local/state/marshal-factory/runner.log`. Run `loginctl enable-linger` once so the service keeps running without a login session.
+
 ## Add your repo
 
 A target repo is any git repo whose `origin` is on GitHub and whose default branch is `main`. The GitHub App must be installed on it.
