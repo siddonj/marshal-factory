@@ -238,7 +238,7 @@ export async function resumeAnswered() {
   return resumed;
 }
 
-/** Nudges stuck runs once, then fails them; see lib/watchdog.ts for when a run counts as stuck. */
+/** Nudges stuck runs once, then fails them, and fails a run waiting on an approval at once; see lib/watchdog.ts. */
 export async function watchdog() {
   const working = await db
     .select({
@@ -257,14 +257,16 @@ export async function watchdog() {
     if (isHibernated(job)) continue;
     const now = new Date();
     const host = hosts.forJob(job);
+    const { state, blockedOn } = await threads.watch(job.t3_thread_id, host);
     const action = watch(
       {
         stage: job.stage,
         lastEventAt: lastEventAt ?? job.updated_at,
         nudgedAt: job.nudged_at,
         nudgedStage: job.nudged_stage,
-        thread: await threads.state(job.t3_thread_id, host),
+        thread: state,
         tracked: jobTracked(job, drivers),
+        blockedOn,
         now,
       },
       config.factory,

@@ -108,6 +108,7 @@ try {
     const issues = calls.filter((c) => c.args[2] === "issue");
     assert.deepEqual(issues[0]!.args.filter((a, i) => issues[0]!.args[i - 1] === "--scope"), ["orchestration:read"], "a read signs in read-only");
     assert.ok(issues.every((c) => c.args.includes("--ttl") && c.args[c.args.indexOf("--ttl") + 1] === "5m"), "short-lived sessions");
+    assert.ok(issues.every((c) => c.args[c.args.indexOf("--subject") + 1] === "mcp-client"), "T3's /mcp refuses a session not issued to its MCP client subject");
     assert.equal(calls.filter((c) => c.args[2] === "revoke").length, issues.length, "every session is revoked after use");
   }
 

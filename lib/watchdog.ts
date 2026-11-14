@@ -11,6 +11,8 @@ export type WatchInput = {
   thread: ThreadState;
   /** False for a harness that reports no stages, so quiet says nothing about whether it is stuck. */
   tracked: boolean;
+  /** The approval or question the thread waits on, or null. Nobody answers one in a factory run, and a nudge cannot. */
+  blockedOn: string | null;
   now: Date;
 };
 
@@ -21,12 +23,14 @@ export type WatchAction =
   | { kind: "fail"; reason: string };
 
 const minutes = (ms: number) => ms / 60_000;
+const BLOCKED_PROMPT_CHARS = 400;
 
 /**
  * Decides what a working job needs. A run is stuck when it has been quiet past the threshold,
  * or its thread stopped and stayed quiet past a short grace. The first time it gets a nudge; if
- * it is still stuck in the same stage after the second threshold, it fails. An untracked run is
- * only failed when its thread is gone.
+ * it is still stuck in the same stage after the second threshold, it fails. A thread waiting on
+ * an approval or question fails at once. An untracked run is otherwise only failed when its
+ * thread is gone.
  */
 export function watch(input: WatchInput, limits: FactoryLimits): WatchAction {
   const idle = minutes(input.now.getTime() - input.lastEventAt.getTime());
@@ -34,6 +38,11 @@ export function watch(input: WatchInput, limits: FactoryLimits): WatchAction {
 
   if (input.thread === "gone") {
     return { kind: "fail", reason: `its T3 thread is gone (stage ${input.stage})` };
+  }
+  if (input.blockedOn !== null) {
+    const flat = input.blockedOn.replace(/\s*\n\s*/g, " | ");
+    const prompt = flat.length > BLOCKED_PROMPT_CHARS ? `${flat.slice(0, BLOCKED_PROMPT_CHARS)}…` : flat;
+    return { kind: "fail", reason: `its T3 thread is waiting on an approval or question nobody can answer (stage ${input.stage}): ${prompt}` };
   }
   if (!input.tracked) return input.nudgedAt ? { kind: "reset" } : { kind: "ok" };
   const stuck =
