@@ -1,0 +1,1 @@
+ALTER TABLE "jobs" ADD COLUMN "auto_retry" jsonb;

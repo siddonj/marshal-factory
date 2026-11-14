@@ -19,6 +19,7 @@ const { createBeat, inventoryCollectors, systemCollectors, thisMachine } = await
 const { closeBroadcast, deliveryFor, expirePairings, INTENT_ATTEMPTS, leaseIntent, loggable, receiptIntent, recordReceipt } = await import("./intents");
 const { launchQueued } = await import("./launch");
 const { openT3, tickSandboxes } = await import("./lifecycle");
+const { requeueDue } = await import("./retry");
 const { recheckScheduler } = await import("./recheck");
 const { everyAtMost, serialQueue } = await import("./queue");
 const { isolated, reconcile } = await import("./reconcile");
@@ -204,6 +205,8 @@ async function tick() {
   return {
     // First, so stage reports a hook or MCP call could not deliver reach the board before anything reads it.
     outbox: await isolated(flushLocalOutbox),
+    // Before the claim, so a retry that came due puts its issue back for this tick's claim to start.
+    retried: await isolated(() => requeueDue()),
     claimed: await isolated(() => ops.claim()),
     // An answer can land before its question reached the source, and its intent then finds nothing.
     resumed: await isolated(ops.resumeAnswered),

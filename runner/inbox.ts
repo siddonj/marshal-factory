@@ -8,8 +8,10 @@ import { changesMessage, type CloseDetail, type FeedbackDetail, type RetryDetail
 import { parseJob, sourceFor } from "../lib/sources";
 import type { Job, JobId } from "../lib/sources/types";
 import { canTransition, runnerEventId } from "../lib/stages";
+import { pendingRetry } from "../lib/retry";
 import { requestedStop } from "../lib/stop";
 import { claim, finishStop, IN_FLIGHT, postEvent, threads } from "./ops";
+import { cancelRetry } from "./retry";
 
 // The inbox's actions on the job's own machine. Requested changes reach the thread once per
 // feedback id: the id is claimed on the job before the send and given back if the send fails, as
@@ -159,6 +161,7 @@ export async function closeJob(id: JobId, { actor, reason }: CloseDetail, now = 
       pr = pull.state === "open" ? "closed" : "already closed";
     }
     if (!failing) {
+      await cancelRetry(job, `closed in the inbox by ${actor}`, { writtenBack: false });
       await db.update(jobs).set({ dismissed_at: now }).where(eq(jobs.id, job.id));
       return { closed: job.key, pr };
     }
@@ -200,7 +203,8 @@ export async function retryJob(id: JobId, { actor, attempt, note }: RetryDetail,
   if (job.attempt > attempt) return { started: job.attempt };
   if (job.stage !== "failed") return { refused: `The job is ${job.stage}, not failed; there is nothing to retry.` };
   // Until the failure is written back, that write-back would take the label away again after requeue.
-  if (job.synced_event_id !== job.stage_event_id) return { refused: "The failure is still being written back to the issue. Retry again in a minute." };
+  // A failure waiting on its automatic retry is held back on purpose, and starting it now is fine.
+  if (job.synced_event_id !== job.stage_event_id && !pendingRetry(job)) return { refused: "The failure is still being written back to the issue. Retry again in a minute." };
   const next = job.attempt + 1;
   const text = note.trim();
   if (text) {

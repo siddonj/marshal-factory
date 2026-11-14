@@ -14,6 +14,7 @@ import { attemptBranch, isJobKey, isMcpSession } from "../lib/factory";
 import { ownerNoteSection } from "../lib/inbox";
 import { attemptBranchSql } from "../lib/branch-sql";
 import { nudgeMessage, watch } from "../lib/watchdog";
+import { pendingRetry, planRetry } from "../lib/retry";
 import { factoryPlaybook, jobExecution } from "../lib/playbook";
 import { isTracked } from "../lib/harness";
 import { readHarnesses } from "../lib/t3-state";
@@ -31,6 +32,7 @@ import { leaseSlot, teardownSandbox } from "./lifecycle";
 import { confirmStops, stopDelivered } from "./stops";
 import { postEvent } from "./ingest-client";
 import { recordCodexUsage } from "./codex-usage";
+import { cancelRetry, pendingRetrySql } from "./retry";
 
 export { ingestClient, postEvent } from "./ingest-client";
 import { threads } from "./threads";
@@ -319,13 +321,17 @@ export function harnessDrivers() {
 export const jobTracked = (job: Pick<JobRow, "provider">, drivers: ReadonlyMap<string, string>) =>
   isTracked(drivers.get(job.provider ?? config.factory.provider) ?? job.provider ?? config.factory.provider);
 
-/** Fails the stage this pass looked at, so a report that landed since then wins; false when one did. */
+/**
+ * Fails the stage this pass looked at, so a report that landed since then wins; false when one did.
+ * The failure says nothing about the issue, so it earns a retry while the job has attempts left
+ * (lib/retry.ts).
+ */
 export async function watchdogFail(job: Pick<JobRow, "id" | "key" | "external_id" | "attempt" | "stage" | "stage_event_id" | "session_id">, reason: string, now = new Date()) {
   const eventId = runnerEventId("watchdog", job.external_id, job.attempt, job.stage_event_id ?? job.stage);
   const summary = `Watchdog stopped this run: ${reason}.`;
   const failed = await db
     .update(jobs)
-    .set({ stage: "failed", stage_at: now, stage_summary: summary, question: null, stage_event_id: eventId, updated_at: now })
+    .set({ stage: "failed", stage_at: now, stage_summary: summary, question: null, stage_event_id: eventId, auto_retry: planRetry(job.attempt, config.factory.retry, now), updated_at: now })
     .where(
       and(
         eq(jobs.id, job.id),
@@ -433,6 +439,8 @@ export async function writeBack({ only }: { only?: readonly string[] } = {}) {
           or(isNull(jobs.synced_event_id), ne(jobs.synced_event_id, jobs.stage_event_id)),
           // A stop is written back once it is confirmed or marked unconfirmed, not while it is on its way.
           sql`not ${stoppingSql}`,
+          // Nor a failure that is retried: the issue keeps its label until the retry or its cancel.
+          sql`not coalesce(${pendingRetrySql}, false)`,
           only ? inArray(jobs.key, [...only]) : undefined,
         ),
       )
@@ -777,6 +785,11 @@ export async function stopJob(id: JobId, detail: string) {
       if (job.stage === "failed") return finishStop(job);
       await deliverStops(job.id);
       return "stopped";
+    }
+    // A failure waiting on its automatic retry: the source now says it is not wanted, so it never comes.
+    if (pendingRetry(job)) {
+      if (await cancelRetry(job, detail, { writtenBack: true })) return "retry cancelled";
+      continue;
     }
     if (!canTransition(job.stage, "failed", "stop")) return "not running";
 

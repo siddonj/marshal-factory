@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { JobRow } from "../db/schema";
 import { MERGE_VIAS, mergeDecisionSchema, type MergeDecision } from "./merge-decision";
 import { parseStop, stopLine, stopNeedsOwner, stopView } from "./stop";
+import { pendingRetry, retryLine } from "./retry";
 
 // The "Needs you" inbox: every job waiting on the owner, in one list. Pure, so the panel, its
 // nav badge, the runner and the regressions share the rules.
@@ -92,7 +93,7 @@ export function inboxItems<J extends InboxJob>(jobs: readonly J[]): InboxItem<J>
 }
 
 /** The one line a row gives for why the job is in the inbox. */
-export function inboxReason(item: InboxItem<InboxJob & Pick<JobRow, "question" | "stage_summary">>): string {
+export function inboxReason(item: InboxItem<InboxJob & Pick<JobRow, "question" | "stage_summary" | "attempt" | "auto_retry">>, now?: number): string {
   const { kind, job, decision } = item;
   switch (kind) {
     case "question":
@@ -105,6 +106,8 @@ export function inboxReason(item: InboxItem<InboxJob & Pick<JobRow, "question" |
     case "failed": {
       const stop = stopView(job.stop, job.execution === "modal");
       const summary = job.stage_summary ?? "The job failed.";
+      const retry = pendingRetry(job);
+      if (retry) return `${retryLine(retry, now)} · ${summary}`;
       return stop?.kind === "stopping" ? `${stopLine(stop)} · ${summary}` : summary;
     }
     case "stop_unconfirmed": {

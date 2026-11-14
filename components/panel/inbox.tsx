@@ -13,11 +13,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import type { JobRow } from "@/db/schema";
 import { parseAssessment } from "@/lib/assessment";
 import { INBOX_LABELS, inboxItems, inboxReason, type InboxItem, type InboxKind } from "@/lib/inbox";
+import { pendingRetry } from "@/lib/retry";
 import { stopLine, stopView } from "@/lib/stop";
 import { AUTONOMY_LABELS, type ReviewSummary } from "@/lib/merge-decision";
 import { sourceLink } from "@/lib/sources/shapes";
 import { cn } from "@/lib/utils";
 import type { BoardCard } from "./cards";
+import { RetryLine } from "./retry-line";
 import { Screenshots } from "./screenshots";
 import { EvidenceSummaryList } from "./evidence";
 import { InboxActions } from "./inbox-actions";
@@ -98,9 +100,11 @@ function Why({ item }: { item: Item }) {
       return <p className="whitespace-pre-wrap">{job.question ?? job.stage_summary}</p>;
     case "failed": {
       const stop = stopView(job.stop, job.execution === "modal");
+      const retry = pendingRetry(job);
       return (
         <div className="flex flex-col gap-1">
           <p className="whitespace-pre-wrap">{job.stage_summary ?? "The job failed without a summary."}</p>
+          {retry && <RetryLine retry={retry} />}
           {stop?.kind === "stopping" && <p className="text-xs text-muted-foreground">{stopLine(stop)}</p>}
         </div>
       );

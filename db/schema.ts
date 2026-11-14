@@ -20,6 +20,7 @@ import type { CheckSource, EvidenceCheck, EvidenceSummary, Producer } from "../l
 import { DEFAULT_EXECUTION, type Execution } from "../lib/execution";
 import type { Autonomy, MergeDecision } from "../lib/merge-decision";
 import type { NotificationConfig } from "../lib/notifications";
+import type { AutoRetry } from "../lib/retry";
 import type { ScreenshotType } from "../lib/screenshots";
 import { ONBOARDING_STATES, type OnboardingDetail } from "../lib/onboarding";
 import type { NotifyKind, SlackMessageState } from "../lib/slack";
@@ -146,6 +147,8 @@ export const jobs = pgTable(
     previous_failure: text("previous_failure"),
     /** The owner's note for one attempt, from Retry in the inbox. Keyed by attempt, so a later attempt ignores a stale note and the claim need not clear it. */
     attempt_note: jsonb("attempt_note").$type<{ attempt: number; text: string }>(),
+    /** The automatic retry a watchdog failure scheduled (lib/retry.ts). Keyed by the attempt it starts, so the claim need not clear it. */
+    auto_retry: jsonb("auto_retry").$type<AutoRetry>(),
     /** Unused: the per-attempt cap it held was removed. Kept, with a default, for runners and ingest deployed before that. */
     budget_usd: doublePrecision("budget_usd").notNull().default(5),
     /** When the watchdog nudged a stuck run, and in which stage; cleared once the stage moves on. */
