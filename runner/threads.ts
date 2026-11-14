@@ -68,8 +68,9 @@ async function showThread(threadId: string | null, host: JobHost): Promise<Shown
 
 /**
  * Reads the timeline only when T3 counts a pending request, so a healthy thread costs one `t3 thread
- * show`. When the timeline cannot be read the count stands in: in T3 today only approvals and
- * questions raise one, and an error here must not hold up the watchdog for every other job.
+ * show`. When the timeline cannot be read the thread is not called blocked: T3's pending count also
+ * covers its own tool calls and auth refreshes, so a hiccup here must not fail a healthy run, and
+ * must not hold up the watchdog for every other job. The next tick looks again.
  */
 async function watchThread(threadId: string | null, host: JobHost): Promise<ThreadWatch> {
   const { read, activity, pending } = await showThread(threadId, host);
@@ -78,7 +79,9 @@ async function watchThread(threadId: string | null, host: JobHost): Promise<Thre
   try {
     return { state: read.state, blockedOn: await waitingPrompt(host, threadId!, activity.activeRunId, pending.items) };
   } catch (error) {
-    return { state: read.state, blockedOn: `${pending.requests} pending request(s); T3's timeline could not be read: ${String((error as { stderr?: string }).stderr || (error as Error).message).slice(0, 200)}` };
+    const reason = String((error as { stderr?: string }).stderr || (error as Error).message).slice(0, 200);
+    console.log(JSON.stringify({ at: new Date().toISOString(), event: "watchdog:timeline-unreadable", thread: threadId, pending: pending.requests, reason }));
+    return { state: read.state, blockedOn: null };
   }
 }
 
