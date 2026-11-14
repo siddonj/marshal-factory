@@ -188,18 +188,19 @@ export async function interruptThread(host: JobHost, threadId: string, requestId
 const TAIL_ITEMS = 100;
 const TAIL_PAGES = 10;
 const timeline = z.object({
-  items: z.array(z.object({ type: z.string(), status: z.string(), text: z.string().nullish() })),
+  items: z.array(z.object({ runId: z.string().nullish(), type: z.string(), status: z.string(), text: z.string().nullish() })),
   nextPosition: z.number().int().nullish(),
   hasMore: z.boolean(),
 });
 
 /**
- * What the thread's waiting approval or question asks, read from the tail of its timeline: the
- * command it holds up (T3 shows it as a running command_execution) and the prompt. Null when none
- * waits; T3's pending request count also covers its own tool calls and auth refreshes, so only a
- * waiting approval_request or user_input_request item counts.
+ * What the active run's waiting approval or question asks, read from the tail of the thread's
+ * timeline: the command it holds up (T3 shows it as a running command_execution) and the prompt.
+ * Null when none waits. T3's pending request count also covers its own tool calls, auth refreshes
+ * and requests an interrupted run left behind, so only a waiting approval_request or
+ * user_input_request item of `runId` counts.
  */
-export async function waitingPrompt(host: JobHost, threadId: string, itemCount: number): Promise<string | null> {
+export async function waitingPrompt(host: JobHost, threadId: string, runId: string, itemCount: number): Promise<string | null> {
   return withMcp(host, ["orchestration:read"], async (call) => {
     let afterPosition = Math.max(0, itemCount - TAIL_ITEMS);
     let command: string | null = null;
@@ -207,6 +208,7 @@ export async function waitingPrompt(host: JobHost, threadId: string, itemCount: 
     for (let page = 0; page < TAIL_PAGES; page++) {
       const read = timeline.parse(await call("t3_thread_read", { threadId, view: "activity", afterPosition, limit: TAIL_ITEMS, maxCharsPerItem: 2000, runLimit: 1 }));
       for (const item of read.items) {
+        if (item.runId !== runId) continue;
         if (item.type === "command_execution" && item.status === "running") command = item.text ?? null;
         if (item.status === "waiting" && (item.type === "approval_request" || item.type === "user_input_request")) {
           prompt = [item.type === "approval_request" ? command : null, item.text || item.type].filter(Boolean).join("\n");

@@ -33,9 +33,9 @@ const shown = z.object({
   messages: z.array(z.unknown()).nullish().catch(null),
 });
 
-/** Gone means T3 no longer has the thread, it is archived, or its worktree left the disk. */
 type Shown = { read: ThreadRead; activity: ThreadActivity; pending: { requests: number; items: number } };
 
+/** Gone means T3 no longer has the thread, it is archived, or its worktree left the disk. */
 async function showThread(threadId: string | null, host: JobHost): Promise<Shown> {
   const none = { requests: 0, items: 0 };
   const gone: Shown = { read: GONE, activity: { state: "gone", activeRunId: null, projectId: null }, pending: none };
@@ -72,11 +72,11 @@ async function showThread(threadId: string | null, host: JobHost): Promise<Shown
  * questions raise one, and an error here must not hold up the watchdog for every other job.
  */
 async function watchThread(threadId: string | null, host: JobHost): Promise<ThreadWatch> {
-  const { read, pending } = await showThread(threadId, host);
+  const { read, activity, pending } = await showThread(threadId, host);
   // An interrupted run leaves its request pending, but a stopped thread waits on nothing: a nudge starts a new turn.
-  if (read.state !== "running" || pending.requests === 0) return { state: read.state, blockedOn: null };
+  if (read.state !== "running" || activity.activeRunId === null || pending.requests === 0) return { state: read.state, blockedOn: null };
   try {
-    return { state: read.state, blockedOn: await waitingPrompt(host, threadId!, pending.items) };
+    return { state: read.state, blockedOn: await waitingPrompt(host, threadId!, activity.activeRunId, pending.items) };
   } catch (error) {
     return { state: read.state, blockedOn: `${pending.requests} pending request(s); T3's timeline could not be read: ${String((error as { stderr?: string }).stderr || (error as Error).message).slice(0, 200)}` };
   }
