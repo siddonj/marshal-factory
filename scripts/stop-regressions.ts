@@ -108,7 +108,61 @@ try {
     const issues = calls.filter((c) => c.args[2] === "issue");
     assert.deepEqual(issues[0]!.args.filter((a, i) => issues[0]!.args[i - 1] === "--scope"), ["orchestration:read"], "a read signs in read-only");
     assert.ok(issues.every((c) => c.args.includes("--ttl") && c.args[c.args.indexOf("--ttl") + 1] === "5m"), "short-lived sessions");
+    assert.ok(issues.every((c) => c.args[c.args.indexOf("--subject") + 1] === "mcp-client"), "T3's /mcp refuses a session not issued to its MCP client subject");
     assert.equal(calls.filter((c) => c.args[2] === "revoke").length, issues.length, "every session is revoked after use");
+  }
+
+  // --- the watchdog's read of a thread: a waiting approval blocks it, an unreadable timeline does not
+  {
+    const calls: string[][] = [];
+    let pendingRequests = 0;
+    let timeline: "approval" | "unreadable" = "approval";
+    const watched: JobHost = {
+      t3: "t3",
+      async run(_command, args, options) {
+        calls.push(args);
+        if (args[0] === "thread" && args[1] === "show") {
+          return { stdout: JSON.stringify({ thread: { archived: false, worktreePath: null, activeRunId: "run-1", status: "running", projectId: "proj-1", pendingRequestCount: pendingRequests, itemCount: 3 }, messages: [] }), stderr: "" };
+        }
+        if (timeline === "unreadable") throw new Error("T3 MCP initialize answered HTTP 503");
+        if (args[0] === "auth" && args[2] === "issue") return { stdout: JSON.stringify({ sessionId: "sess-w", token: "tok-w" }), stderr: "" };
+        if (args[0] === "auth" && args[2] === "revoke") return { stdout: "", stderr: "" };
+        JSON.parse(options!.input!);
+        const items = [
+          { runId: "run-1", type: "command_execution", status: "running", text: 'rm -rf "$(cat /tmp/dir)"' },
+          { runId: "run-1", type: "approval_request", status: "waiting", text: "Allow this command?" },
+        ];
+        return { stdout: JSON.stringify({ structuredContent: { items, nextPosition: null, hasMore: false } }), stderr: "" };
+      },
+      readFile: async (path) => (path === "/root/.t3/userdata/server-runtime.json" ? JSON.stringify({ origin: "http://127.0.0.1:3773" }) : null),
+      writeFile: async () => {},
+      exists: async () => true,
+      list: async () => [],
+      mtimeMs: async () => 0,
+      remove: async () => {},
+    };
+    const logged: string[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => void logged.push(args.join(" "));
+    try {
+      const healthy = await threads.watch("thread-W", watched);
+      assert.deepEqual([healthy.state, healthy.blockedOn], ["running", null], "no pending request: not blocked");
+      assert.equal(calls.length, 1, "a healthy thread costs one `t3 thread show` and no MCP session");
+
+      pendingRequests = 1;
+      calls.length = 0;
+      const blocked = await threads.watch("thread-W", watched);
+      assert.equal(blocked.state, "running");
+      assert.ok(blocked.blockedOn?.includes('rm -rf "$(cat /tmp/dir)"') && blocked.blockedOn.includes("Allow this command?"), `a waiting approval names the command it holds up: ${blocked.blockedOn}`);
+
+      timeline = "unreadable";
+      logged.length = 0;
+      const unreadable = await threads.watch("thread-W", watched);
+      assert.deepEqual([unreadable.state, unreadable.blockedOn], ["running", null], "an unreadable timeline must not fail a healthy run: T3's pending count also covers its own tool calls");
+      assert.ok(logged.some((l) => l.includes("watchdog:timeline-unreadable") && l.includes("503")), "the skipped check is logged with the reason");
+    } finally {
+      console.log = log;
+    }
   }
 
   // --- a polite stop the thread obeys: confirmed once it stays quiet for the settle time

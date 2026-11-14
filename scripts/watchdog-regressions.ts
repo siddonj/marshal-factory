@@ -13,6 +13,7 @@ const base: WatchInput = {
   nudgedStage: null,
   thread: "running",
   tracked: true,
+  blockedOn: null,
   now,
 };
 
@@ -46,5 +47,15 @@ assert.deepEqual(
   "a nudge left from before is cleared instead of failing the run",
 );
 assert.equal(watch({ ...untracked, thread: "gone" }, limits).kind, "fail", "an untracked run whose thread is gone still fails");
+
+// RES-13: Claude Code asked to approve `rm -rf "$(cat /tmp/res13-dir)"` even in bypass mode, and nobody answers in a factory run.
+const prompt = 'kill 1616 1632; rm -rf "$(cat /tmp/res13-dir)" /tmp/res13-pid; git status --short';
+const blocked = watch({ ...base, blockedOn: prompt }, limits);
+assert.equal(blocked.kind, "fail", "a thread waiting on an approval fails at once, not after the stuck and nudge windows");
+assert.ok(blocked.kind === "fail" && blocked.reason.includes(prompt), `the reason quotes what it waits on: ${JSON.stringify(blocked)}`);
+assert.equal(watch({ ...untracked, blockedOn: prompt }, limits).kind, "fail", "an untracked run blocked on an approval fails too");
+assert.equal(watch({ ...nudged, blockedOn: prompt }, limits).kind, "fail", "a nudge cannot answer an approval, so a nudged run fails too");
+const long = watch({ ...base, blockedOn: "x".repeat(5000) }, limits);
+assert.ok(long.kind === "fail" && long.reason.length < 600, "a long command is cut short in the reason");
 
 console.log("watchdog regressions passed");
