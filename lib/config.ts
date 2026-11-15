@@ -67,6 +67,17 @@ export const factorySchema = z
     stoppedGraceMinutes: z.number().nonnegative().default(2),
     /** After a nudge, this much more quiet marks the job failed. */
     failAfterNudgeMinutes: z.number().positive().default(30),
+    /** Automatic retries of a run the watchdog failed; see lib/retry.ts. */
+    retry: z
+      .object({
+        /** The most attempts a job gets in total before a failure waits for a human; 0 never retries. */
+        maxAttempts: z.number().int().nonnegative().default(0),
+        /** The wait before the first retry; each later one waits twice as long as the one before. */
+        baseSeconds: z.number().positive().default(10),
+        /** The longest wait before a retry. */
+        maxBackoffMinutes: z.number().positive().default(5),
+      })
+      .prefault({}),
     /** USD per million tokens by model id, over lib/pricing.ts's defaults; null makes a model's cost unknown. The runner's spend reconcile uses it; the panel shows the defaults. */
     pricing: pricingSchema.default({}),
     /** Days a failed job keeps its worktree for a human to look at before cleanup removes it. */
@@ -111,6 +122,7 @@ export const factorySchema = z
   })
   .prefault({});
 export type FactoryLimits = z.infer<typeof factorySchema>;
+export type RetryLimits = FactoryLimits["retry"];
 
 const configSchema = z.object({
   linearApiKey: z.string().min(1),

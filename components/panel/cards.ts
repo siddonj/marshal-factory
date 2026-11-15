@@ -9,6 +9,7 @@ import { parseInventory, UNKNOWN } from "@/lib/machine";
 import { costKnown } from "@/lib/pricing";
 import { mergeDecisionSchema, type MergeDecision } from "@/lib/merge-decision";
 import { sourceLink, type JobId } from "@/lib/sources/shapes";
+import { pendingRetry, type AutoRetry } from "@/lib/retry";
 import { parseStop, stopView, type StopView } from "@/lib/stop";
 import { groupBy } from "./format";
 
@@ -46,6 +47,8 @@ export type BoardCard = {
   evidence: EvidenceLine | null;
   /** Where the attempt's stop is, and the thread it went to; null for a job never stopped. */
   stop: { view: StopView; thread: string | null } | null;
+  /** The automatic retry a watchdog failure is waiting on. */
+  retry: AutoRetry | null;
   /** The newest change to the job or any of its runs. */
   updatedAt: Date;
 };
@@ -160,6 +163,7 @@ export function boardCards(jobs: readonly JobRow[], runs: readonly RunRow[], har
       mergeDecision: shownDecision(job),
       evidence: jobEvidenceLine(job),
       stop: cardStop(job),
+      retry: pendingRetry(job),
       updatedAt: new Date(Math.max(job.updated_at.getTime(), ...jobRuns.map((r) => r.last_event_at.getTime()))),
     };
   });
@@ -196,6 +200,7 @@ export function boardCards(jobs: readonly JobRow[], runs: readonly RunRow[], har
         mergeDecision: null,
         evidence: null,
         stop: null,
+        retry: null,
         updatedAt: new Date(Math.max(...sorted.map((r) => r.last_event_at.getTime()))),
       };
     },

@@ -118,7 +118,7 @@ export const SLACK_COMMAND = "/factory";
 export const SLACK_SHORTCUT_CALLBACK_ID = "send_to_factory";
 
 export type NotifyJob = InboxJob &
-  Pick<JobRow, "id" | "source" | "title" | "url" | "repo" | "attempt" | "provider" | "question" | "stage_summary" | "answered_at">;
+  Pick<JobRow, "id" | "source" | "title" | "url" | "repo" | "attempt" | "auto_retry" | "provider" | "question" | "stage_summary" | "answered_at">;
 
 export type NotifyEvent<J extends NotifyJob = NotifyJob> = {
   id: string;
@@ -140,13 +140,13 @@ function occurrence(kind: InboxKind, job: NotifyJob) {
 
 export const eventId = (job: Pick<NotifyJob, "id" | "attempt">, kind: NotifyKind, occurs: string) => `${job.id}:${job.attempt}:${kind}:${occurs}`;
 
-export function notifyEvents<J extends NotifyJob>(jobs: readonly J[]): NotifyEvent<J>[] {
+export function notifyEvents<J extends NotifyJob>(jobs: readonly J[], now = Date.now()): NotifyEvent<J>[] {
   const events: NotifyEvent<J>[] = inboxItems(jobs).map((item) => ({
     id: eventId(item.job, item.kind, occurrence(item.kind, item.job)),
     kind: item.kind,
     job: item.job,
     at: item.at,
-    reason: inboxReason(item),
+    reason: inboxReason(item, now),
     open: true,
   }));
   for (const job of jobs) {
