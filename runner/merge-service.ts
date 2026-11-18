@@ -6,7 +6,7 @@ import { parseAssessment } from "../lib/assessment";
 import type { RepoName } from "../lib/github/app";
 import { github, type MergeCandidate } from "../lib/github/pulls";
 import { DECISION_MARKER, fingerprint, prCommentBody, sourceCommentBody } from "../lib/merge-comments";
-import { blockedReason, mergeDecisionSchema, type MergeDecision, type MergeMethod, type MergeVia } from "../lib/merge-decision";
+import { blockedReason, mergeDecisionSchema, type MergeDecision, type MergeMethod, type MergeVia, type ObservedGate } from "../lib/merge-decision";
 import { parseJobs, sourceFor } from "../lib/sources";
 import type { Job } from "../lib/sources/types";
 import { runnerEventId } from "../lib/stages";
@@ -46,6 +46,13 @@ function auditDetail({ outcome, reasons, autonomy }: MergeDecision) {
   }
 }
 
+/** The observe-mode gates that would block next's head and weren't already audited for it. */
+function newlyObserved(previous: MergeDecision | null, next: MergeDecision) {
+  const key = ({ gate, reasons }: ObservedGate) => JSON.stringify([gate, reasons]);
+  const seen = new Set(previous?.headSha === next.headSha ? (previous.observed ?? []).map(key) : []);
+  return (next.observed ?? []).filter((o) => !seen.has(key(o)));
+}
+
 type Tx = Pick<typeof db, "insert">;
 
 export const auditFactory = (tx: Tx, job: Job, at: Date, action: AuditRow["action"], headSha: string, detail: string, result: AuditRow["result"] = null, actor = "factory") =>
@@ -63,6 +70,9 @@ export async function storeDecision(job: Job, previous: MergeDecision | null, ne
       .where(and(eq(jobs.id, job.id), eq(jobs.stage, "pr"), sql`${jobs.stage_event_id} is not distinct from ${job.stage_event_id}`))
       .returning({ id: jobs.id });
     if (updated.length === 0) return "gone";
+    for (const { gate, reasons } of newlyObserved(previous, next)) {
+      await auditFactory(tx, job, new Date(next.evaluatedAt), "gate_observed", next.headSha ?? "", [`Gate ${gate} would have blocked (observe)`, ...reasons].join(" · "));
+    }
     if (sameDecision(previous, next)) return "same";
     await auditFactory(tx, job, new Date(next.evaluatedAt), "merge_decided", next.headSha ?? "", auditDetail(next));
     return "changed";

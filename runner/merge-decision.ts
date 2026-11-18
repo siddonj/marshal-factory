@@ -16,6 +16,7 @@ import {
   decideMerge,
   OFF_DECISION,
   type Decision,
+  type GateModes,
   type MergeDecision,
   type PrFacts,
   type RepoPolicy,
@@ -37,7 +38,8 @@ import { runnerVerification, startVerification } from "./verify";
 // stores the decision on the job. GitHub and the source only; a hibernated sandbox stays asleep.
 // A settled decision is read again when the head, the report or the autonomy changes, or after
 // RECHECK_MS; a pending one, and a merge under auto, every pass. The audit log gets a row only
-// when the decision changes. Under auto a merge decision merges at once, on facts read in the
+// when the decision changes, and one per observe-mode gate that would have blocked a head
+// (lib/merge-decision.ts GATE_ROLLOUT). Under auto a merge decision merges at once, on facts read in the
 // same pass, through runner/merge-service.ts; a refusal hands over and is not retried for that
 // head. The owner's approval, from the inbox or run detail, merges through the same service.
 // Each pass also reads the attempt's evidence (job_evidence) for the PR head: no merge without
@@ -86,7 +88,7 @@ async function changedTrust(job: Job, detail: { headSha: string; baseRef: string
 
 const sameEvidence = (a: HeadEvidence | undefined, b: HeadEvidence) => JSON.stringify(a) === JSON.stringify(b);
 
-async function evaluate(job: Job, policy: RepoPolicy, previous: MergeDecision | null, now: number, required: PlannedCheck[] | null): Promise<Evaluated> {
+async function evaluate(job: Job, policy: RepoPolicy, previous: MergeDecision | null, now: number, required: PlannedCheck[] | null, gates: GateModes | undefined): Promise<Evaluated> {
   const sameReport = previous !== null && previous.autonomy === policy.autonomy && previous.stageEventId === job.stage_event_id;
   if (policy.autonomy === "off") {
     return sameReport ? "unchanged" : { decision: OFF_DECISION, headSha: null, headSeenAt: null };
@@ -117,6 +119,7 @@ async function evaluate(job: Job, policy: RepoPolicy, previous: MergeDecision | 
     runner,
     browser: job.execution === "modal",
     trustEdits: await changedTrust(job, detail, pr, required),
+    gates,
   });
   return { decision, headSha: detail.headSha, headSeenAt, review: reviewSummary(pr), evidence, runner };
 }
@@ -131,7 +134,8 @@ function verificationRecord(job: Job, previous: MergeDecision | null, result: Ex
   return kept;
 }
 
-export async function decideMerges({ now = Date.now(), only }: { now?: number; only?: string[] } = {}) {
+/** `gates` stands in for GATE_ROLLOUT, so a regression can roll a gate out without changing it. */
+export async function decideMerges({ now = Date.now(), only, gates }: { now?: number; only?: string[]; gates?: GateModes } = {}) {
   const machine = await thisMachine();
   const changed: string[] = [];
   const errors: { key: string; error: string }[] = [];
@@ -149,7 +153,7 @@ export async function decideMerges({ now = Date.now(), only }: { now?: number; o
       const policy = resolvePolicy(policies, job.repo);
       const previous = storedDecision(job);
       const { recipe, required } = requiredChecks(policies, job.repo);
-      const result = await evaluate(job, policy, previous, now, required);
+      const result = await evaluate(job, policy, previous, now, required, gates);
       if (result === "unchanged") {
         if (previous) await syncComments(job, previous);
         continue;
@@ -171,6 +175,7 @@ export async function decideMerges({ now = Date.now(), only }: { now?: number; o
         ...(result.review && { review: result.review }),
         ...(result.evidence && { evidence: result.evidence }),
         ...(verification && { verification }),
+        ...(result.decision.observed && { observed: result.decision.observed }),
       };
       const stored = await storeDecision(job, previous, next);
       if (stored === "gone") continue;

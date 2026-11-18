@@ -93,6 +93,37 @@ export type RunnerVerificationRecord = z.infer<typeof verificationSchema>;
  */
 export type RunnerVerification = { kind: "available" } | { kind: "running" } | { kind: "failed"; reason: string } | { kind: "unavailable"; reason: string };
 
+/**
+ * The decision's gates. Each blocks with plain reasons, and may wait on a fact still being
+ * computed; reasons come out in this order.
+ */
+export const GATES = ["agent", "review_label", "checks", "conflicts", "bugbot", "screenshots", "trusted_checks", "evidence"] as const;
+export type Gate = (typeof GATES)[number];
+
+/**
+ * `off` evaluates nothing; `observe` records what the gate would have blocked and blocks nothing;
+ * `enforce` blocks. Roll a new gate out as observe, review its audit rows, then enforce it.
+ */
+export const GATE_MODES = ["off", "observe", "enforce"] as const;
+export type GateMode = (typeof GATE_MODES)[number];
+export type GateModes = Readonly<Record<Gate, GateMode>>;
+
+/** Each gate's mode. In code, not per repo: a mode changes in a reviewed commit, for every repo at once. */
+export const GATE_ROLLOUT: GateModes = {
+  agent: "enforce",
+  review_label: "enforce",
+  checks: "enforce",
+  conflicts: "enforce",
+  bugbot: "enforce",
+  screenshots: "enforce",
+  trusted_checks: "enforce",
+  evidence: "enforce",
+};
+
+/** What a gate in observe mode would have blocked at the decision's head. */
+export const observedGateSchema = z.object({ gate: z.enum(GATES), reasons: z.array(z.string()) });
+export type ObservedGate = z.infer<typeof observedGateSchema>;
+
 export const mergeDecisionSchema = z.object({
   outcome: z.enum(MERGE_OUTCOMES),
   reasons: z.array(z.string()),
@@ -120,6 +151,8 @@ export const mergeDecisionSchema = z.object({
   evidence: headEvidenceSchema.optional(),
   /** The runner's own run of the checks at headSha in the job's sandbox; at most one per head. */
   verification: verificationSchema.optional(),
+  /** The observe-mode gates that would have blocked headSha; each is audited once per head. */
+  observed: z.array(observedGateSchema).optional(),
 });
 export type MergeDecision = z.infer<typeof mergeDecisionSchema>;
 
@@ -156,52 +189,71 @@ export type DecisionInput = {
   trustEdits: readonly string[];
   /** Whether the agent had the sandbox's headless browser, so a change to a page can come with screenshots. */
   browser: boolean;
+  /** Each gate's mode; GATE_ROLLOUT unless a regression sets its own. */
+  gates?: GateModes;
 };
 
-/** `verify` is set when only verification at the head stands between the PR and a merge, and the runner may run it. */
-export type Decision = { outcome: MergeOutcome; reasons: string[]; verify?: true };
+/**
+ * `verify` is set when only verification at the head stands between the PR and a merge, and the runner may run it.
+ * `observed` lists the observe-mode gates that would have blocked; absent when none would.
+ */
+export type Decision = { outcome: MergeOutcome; reasons: string[]; verify?: true; observed?: ObservedGate[] };
 
 const minutes = (ms: number) => Math.round(ms / 60_000);
 
-/** Hard limits only; each failure is one plain reason. */
-function hardLimits(input: DecisionInput, pr: PrFacts) {
-  const reasons: string[] = [];
-  if (input.labels.some((l) => l.toLowerCase() === REVIEW_LABEL)) reasons.push(`The issue has the "${REVIEW_LABEL}" label.`);
-  if (pr.checks === "failure") reasons.push("A check failed on the latest commit.");
-  if (pr.mergeable === "conflicting") reasons.push("The pull request conflicts with its base branch.");
-  if (input.policy.requireBugbot) {
-    if (pr.bugbot.review.state === "failed") reasons.push(`Bugbot didn't complete its review (${pr.bugbot.review.conclusion}).`);
-    const open = pr.bugbot.findings.filter((f) => !f.resolved && f.severity !== "low");
-    if (open.length > 0) reasons.push(`Bugbot has ${open.length} unresolved medium or high finding${open.length === 1 ? "" : "s"}.`);
-  }
-  return reasons;
+/** `reasons` block the merge; `waiting` names a fact the gate still needs before it can pass. */
+type GateResult = { reasons: string[]; waiting?: string };
+
+function agentGate({ assessment }: DecisionInput): GateResult {
+  if (!assessment) return { reasons: ["The agent didn't report an assessment."] };
+  if (assessment.recommendation === "merge") return { reasons: [] };
+  return { reasons: [`The agent isn't confident: ${assessment.confidence.reason ?? "it recommends handing over."}`] };
 }
 
-function agentReasons({ assessment }: DecisionInput) {
-  if (!assessment) return ["The agent didn't report an assessment."];
-  if (assessment.recommendation === "merge") return [];
-  return [`The agent isn't confident: ${assessment.confidence.reason ?? "it recommends handing over."}`];
+const reviewLabelGate = ({ labels }: DecisionInput): GateResult => ({
+  reasons: labels.some((l) => l.toLowerCase() === REVIEW_LABEL) ? [`The issue has the "${REVIEW_LABEL}" label.`] : [],
+});
+
+const checksGate = (_: DecisionInput, pr: PrFacts): GateResult => ({
+  reasons: pr.checks === "failure" ? ["A check failed on the latest commit."] : [],
+  ...(pr.checks === "pending" && { waiting: "checks" }),
+});
+
+const conflictsGate = (_: DecisionInput, pr: PrFacts): GateResult => ({
+  reasons: pr.mergeable === "conflicting" ? ["The pull request conflicts with its base branch."] : [],
+  ...(pr.mergeable === "unknown" && { waiting: "GitHub's mergeability check" }),
+});
+
+function bugbotGate({ policy }: DecisionInput, pr: PrFacts): GateResult {
+  if (!policy.requireBugbot) return { reasons: [] };
+  const reasons: string[] = [];
+  if (pr.bugbot.review.state === "failed") reasons.push(`Bugbot didn't complete its review (${pr.bugbot.review.conclusion}).`);
+  const open = pr.bugbot.findings.filter((f) => !f.resolved && f.severity !== "low");
+  if (open.length > 0) reasons.push(`Bugbot has ${open.length} unresolved medium or high finding${open.length === 1 ? "" : "s"}.`);
+  return { reasons, ...(pr.bugbot.review.state === "pending" && { waiting: "Bugbot" }) };
 }
 
 /** A change to a page needs screenshots of it, when the agent had a browser to take them with. */
-function screenshotReasons({ assessment, browser }: DecisionInput, pr: PrFacts): string[] {
-  if (!browser || !assessment || assessment.screenshots?.length) return [];
+function screenshotsGate({ assessment, browser }: DecisionInput, pr: PrFacts): GateResult {
+  if (!browser || !assessment || assessment.screenshots?.length) return { reasons: [] };
   const ui = uiFiles(pr.files.map((f) => f.path));
-  if (ui.length === 0) return [];
+  if (ui.length === 0) return { reasons: [] };
   const named = ui.slice(0, 3).join(", ") + (ui.length > 3 ? ` and ${ui.length - 3} more` : "");
-  return [`The pull request changes UI files (${named}), but the agent attached no screenshots.`];
+  return { reasons: [`The pull request changes UI files (${named}), but the agent attached no screenshots.`] };
 }
 
+const trustedChecksGate = ({ trustEdits }: DecisionInput): GateResult => ({ reasons: [...trustEdits] });
+
 /** The verified-at-head limit: what the agent or the runner ran at exactly the PR's head. */
-function evidenceReasons({ evidence, runner }: DecisionInput, pr: PrFacts): string[] {
+function evidenceGate({ evidence, runner }: DecisionInput, pr: PrFacts): GateResult {
   const head = shortSha(pr.headSha);
   switch (evidence.state) {
     case "verified":
-      return [];
+      return { reasons: [] };
     case "no_checks":
-      return ["No checks defined for this repo."];
+      return { reasons: ["No checks defined for this repo."] };
     case "failed":
-      return [`Checks failed at ${head}: ${evidence.failed.join(", ")}.`];
+      return { reasons: [`Checks failed at ${head}: ${evidence.failed.join(", ")}.`] };
     case "missing":
     case "stale":
     case "dirty":
@@ -210,11 +262,11 @@ function evidenceReasons({ evidence, runner }: DecisionInput, pr: PrFacts): stri
       switch (runner.kind) {
         case "available":
         case "running":
-          return [];
+          return { reasons: [], waiting: verificationWait(pr) };
         case "failed":
-          return [`Not verified at ${head}: ${notVerifiedWhy(evidence)}, and the factory couldn't run the checks itself: ${runner.reason}.`];
+          return { reasons: [`Not verified at ${head}: ${notVerifiedWhy(evidence)}, and the factory couldn't run the checks itself: ${runner.reason}.`] };
         case "unavailable":
-          return [`Not verified at ${head}: ${notVerifiedWhy(evidence)}; ${runner.reason}.`];
+          return { reasons: [`Not verified at ${head}: ${notVerifiedWhy(evidence)}; ${runner.reason}.`] };
         default: {
           const never: never = runner;
           throw new Error(`unknown runner verification ${String(never)}`);
@@ -229,33 +281,46 @@ function evidenceReasons({ evidence, runner }: DecisionInput, pr: PrFacts): stri
 
 const verificationWait = (pr: PrFacts) => `verification at ${shortSha(pr.headSha)}`;
 
-function waitingOn(input: DecisionInput, pr: PrFacts) {
-  const waiting: string[] = [];
-  if (pr.checks === "pending") waiting.push("checks");
-  if (input.policy.requireBugbot && pr.bugbot.review.state === "pending") waiting.push("Bugbot");
-  if (pr.mergeable === "unknown") waiting.push("GitHub's mergeability check");
-  if (evidenceReasons(input, pr).length === 0 && input.evidence.state !== "verified") waiting.push(verificationWait(pr));
-  return waiting;
-}
+const GATE_CHECKS: Record<Gate, (input: DecisionInput, pr: PrFacts) => GateResult> = {
+  agent: agentGate,
+  review_label: reviewLabelGate,
+  checks: checksGate,
+  conflicts: conflictsGate,
+  bugbot: bugbotGate,
+  screenshots: screenshotsGate,
+  trusted_checks: trustedChecksGate,
+  evidence: evidenceGate,
+};
+
+/** The order a pending decision names what it waits for. */
+const WAIT_ORDER: readonly Gate[] = ["checks", "bugbot", "conflicts", "evidence"];
 
 /** Off evaluates nothing: the PR is ready for review, with no reasons to give. */
 export const OFF_DECISION: Decision = { outcome: "handover", reasons: [] };
 
 export function decideMerge(input: DecisionInput): Decision {
   if (input.policy.autonomy === "off") return OFF_DECISION;
-  if (!input.pr) throw new Error("decideMerge needs the PR's facts unless autonomy is off");
-  const reasons = [...agentReasons(input), ...hardLimits(input, input.pr), ...screenshotReasons(input, input.pr), ...input.trustEdits, ...evidenceReasons(input, input.pr)];
-  if (reasons.length > 0) return { outcome: "handover", reasons };
-  const waiting = waitingOn(input, input.pr);
+  const { pr } = input;
+  if (!pr) throw new Error("decideMerge needs the PR's facts unless autonomy is off");
+  const modes = input.gates ?? GATE_ROLLOUT;
+  const results = new Map(GATES.filter((gate) => modes[gate] !== "off").map((gate) => [gate, GATE_CHECKS[gate](input, pr)]));
+  const enforced = (gate: Gate) => (modes[gate] === "enforce" ? results.get(gate) : undefined);
+  // An observed gate never moves the outcome: its reasons don't block and its waits aren't waited for.
+  const observed = GATES.flatMap((gate) => (modes[gate] === "observe" && results.get(gate)!.reasons.length > 0 ? [{ gate, reasons: results.get(gate)!.reasons }] : []));
+  const withObserved = (decision: Decision): Decision => (observed.length > 0 ? { ...decision, observed } : decision);
+
+  const reasons = GATES.flatMap((gate) => enforced(gate)?.reasons ?? []);
+  if (reasons.length > 0) return withObserved({ outcome: "handover", reasons });
+  const waiting = WAIT_ORDER.flatMap((gate) => enforced(gate)?.waiting ?? []);
   if (waiting.length > 0) {
     const timeout = input.checksTimeoutMs ?? CHECKS_TIMEOUT_MS;
     if (input.now - input.headSeenAt < timeout) {
-      const onlyVerification = waiting.length === 1 && waiting[0] === verificationWait(input.pr) && input.runner.kind === "available";
-      return { outcome: "pending", reasons: [`Waiting for ${waiting.join(", ")}.`], ...(onlyVerification && { verify: true as const }) };
+      const onlyVerification = waiting.length === 1 && waiting[0] === verificationWait(pr) && input.runner.kind === "available";
+      return withObserved({ outcome: "pending", reasons: [`Waiting for ${waiting.join(", ")}.`], ...(onlyVerification && { verify: true as const }) });
     }
-    return { outcome: "handover", reasons: [`${waiting.join(", ")} didn't finish within ${minutes(timeout)} minutes.`.replace(/^./, (c) => c.toUpperCase())] };
+    return withObserved({ outcome: "handover", reasons: [`${waiting.join(", ")} didn't finish within ${minutes(timeout)} minutes.`.replace(/^./, (c) => c.toUpperCase())] });
   }
-  return { outcome: "merge", reasons: input.pr.checks === "none" ? [noCiReason(input.pr.headSha)] : [] };
+  return withObserved({ outcome: "merge", reasons: pr.checks === "none" ? [noCiReason(pr.headSha)] : [] });
 }
 
 /** Said on a merge where the factory's evidence at the head stood in for CI. */

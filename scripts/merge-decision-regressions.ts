@@ -18,7 +18,7 @@ const { ingest } = await import("../lib/ingest");
 const { hosts } = await import("../lib/host");
 const { github, bugbotFindingsOf, checkStateOf, pullsClient } = await import("../lib/github/pulls");
 const { parseAssessment } = await import("../lib/assessment");
-const { decideMerge, DEFAULT_POLICY, noCiReason } = await import("../lib/merge-decision");
+const { decideMerge, DEFAULT_POLICY, GATE_ROLLOUT, GATES, noCiReason } = await import("../lib/merge-decision");
 const { globToRegExp } = await import("../lib/globs");
 const { readRepoSettings, resolvePolicy, writeRepoAutonomy } = await import("../lib/settings");
 const { decideMerges, RECHECK_MS } = await import("../runner/merge-decision");
@@ -215,6 +215,56 @@ assert.equal(decideMerge(input({ ...noBugbot, pr: facts({ bugbot: { review: { st
 assert.equal(decideMerge(input({ ...noBugbot, pr: facts({ bugbot: { review: { state: "failed", conclusion: "timed_out" }, findings: [{ severity: "high", resolved: false }] } }) })).outcome, "merge", "nor its findings");
 assert.deepEqual(decideMerge(input({ ...auto, pr: facts({ checks: "none", bugbot: { review: { state: "pending" }, findings: [] } }) })), { outcome: "pending", reasons: ["Waiting for Bugbot."] }, "required, Bugbot is still waited for");
 handsOver({ ...auto, pr: facts({ checks: "none", bugbot: { review: { state: "pending" }, findings: [] } }), headSeenAt: NOW - 61 * 60_000 }, /^Bugbot didn't finish within 60 minutes\.$/, "until the timeout");
+
+// --- gate rollout modes: off evaluates nothing, observe records and blocks nothing, enforce blocks
+const withGate = (gate: (typeof GATES)[number], mode: "off" | "observe" | "enforce") => ({ gates: { ...GATE_ROLLOUT, [gate]: mode } });
+assert.ok(GATES.every((gate) => GATE_ROLLOUT[gate] === "enforce"), "every gate the decision has today enforces");
+const labeled = { labels: ["factory", "review"] };
+const labelReason = 'The issue has the "review" label.';
+assert.deepEqual(decideMerge(input({ ...labeled })), decideMerge(input({ ...labeled, ...withGate("review_label", "enforce") })), "enforce is what the decision does today");
+assert.deepEqual(decideMerge(input({ ...labeled, ...withGate("review_label", "enforce") })), { outcome: "handover", reasons: [labelReason] }, "an enforced gate hands over");
+assert.deepEqual(
+  decideMerge(input({ ...labeled, ...withGate("review_label", "observe") })),
+  { outcome: "merge", reasons: [], observed: [{ gate: "review_label", reasons: [labelReason] }] },
+  "an observed gate leaves the merge alone and names what it would have blocked",
+);
+assert.deepEqual(decideMerge(input({ ...labeled, ...withGate("review_label", "off") })), { outcome: "merge", reasons: [] }, "an off gate isn't evaluated, so nothing is observed");
+assert.deepEqual(decideMerge(input(withGate("review_label", "observe"))), { outcome: "merge", reasons: [] }, "an observed gate that passes records nothing");
+assert.deepEqual(
+  decideMerge(input({ ...labeled, assessment: null, ...withGate("review_label", "observe") })),
+  { outcome: "handover", reasons: ["The agent didn't report an assessment."], observed: [{ gate: "review_label", reasons: [labelReason] }] },
+  "next to an enforced gate that blocks, the observed one is still recorded and adds no reason",
+);
+{
+  // Observe must never change a decision: for each gate, every input decides as with the gate off.
+  const blocking: Partial<DecisionInput>[] = [
+    { assessment: null },
+    labeled,
+    { pr: facts({ checks: "failure" }) },
+    { pr: facts({ checks: "pending" }) },
+    { pr: facts({ mergeable: "conflicting" }) },
+    { pr: facts({ mergeable: "unknown" }) },
+    { pr: facts({ bugbot: { review: { state: "pending" }, findings: [{ severity: "high", resolved: false }] } }) },
+    { browser: true, pr: facts({ files: [{ path: "components/list.tsx", additions: 1, deletions: 0 }] }) },
+    { trustEdits: ["The pull request edits CI workflows (.github/workflows/ci.yml)."] },
+    { ...auto, evidence: { state: "missing" }, runner: { kind: "available" } },
+    { evidence: { state: "failed", sha: "h1", failed: ["test"], passed: 3, total: 4 } },
+    { pr: facts({ checks: "pending" }), headSeenAt: NOW - 61 * 60_000 },
+  ];
+  for (const gate of GATES) {
+    for (const over of blocking) {
+      const { observed, ...observedDecision } = decideMerge(input({ ...over, ...withGate(gate, "observe") }));
+      assert.deepEqual(observedDecision, decideMerge(input({ ...over, ...withGate(gate, "off") })), `observing ${gate} decides as with it off: ${JSON.stringify(over)}`);
+      assert.ok(observed === undefined || (observed.length === 1 && observed[0]!.gate === gate), `only ${gate} is observed`);
+    }
+  }
+  const observedGates = (over: Partial<DecisionInput>, gate: (typeof GATES)[number]) => decideMerge(input({ ...over, ...withGate(gate, "observe") })).observed?.map((o) => o.gate);
+  assert.deepEqual(observedGates({ pr: facts({ checks: "failure" }) }, "checks"), ["checks"], "a failed check is observed");
+  assert.deepEqual(observedGates({ pr: facts({ checks: "pending" }) }, "checks"), undefined, "a check still running would block nothing yet, so isn't observed");
+  assert.deepEqual(decideMerge(input({ pr: facts({ checks: "pending" }), ...withGate("checks", "observe") })), { outcome: "merge", reasons: [] }, "and isn't waited for");
+  assert.deepEqual(observedGates({ evidence: { state: "missing" } }, "evidence"), ["evidence"], "unproven evidence is observed");
+  assert.equal(decideMerge(input({ ...auto, evidence: { state: "missing" }, runner: { kind: "available" }, ...withGate("evidence", "observe") })).verify, undefined, "an observed evidence gate starts no verification");
+}
 
 // --- GitHub parsing
 const run = (name: string, status: string, conclusion: string | null) => ({ name, status, conclusion });
@@ -479,6 +529,34 @@ try {
   assert.deepEqual(await decideMerges({ only: [GOOD], now: t1 + 61 * 60_000 }), [`${GOOD}:handover`]);
   assert.deepEqual((await row(GOOD)).merge_decision!.reasons, ["Checks didn't finish within 60 minutes."]);
   assert.equal((await auditsOf(GOOD)).length, 3);
+
+  // A gate in observe mode: the decision is what it would be with the gate off, and the audit log
+  // gets one row per head naming the gate and what it would have blocked.
+  checks = "success";
+  const OBSERVED = await insert("OBSERVED", { stage: "pr", pr_url: prUrl(10), merge_assessment: assessment() });
+  labels.set(OBSERVED, ["factory", "review"]);
+  await verified(OBSERVED, "h1");
+  const observeLabel = { ...GATE_ROLLOUT, review_label: "observe" } as const;
+  const gateRows = async () => (await auditsOf(OBSERVED)).filter((a) => a.action === "gate_observed").map((a) => [a.actor, a.head_sha, a.detail]);
+  const observedRow = (head: string) => ["factory", head, 'Gate review_label would have blocked (observe) · The issue has the "review" label.'];
+  assert.deepEqual(await decideMerges({ only: [OBSERVED], now: at(31), gates: observeLabel }), [`${OBSERVED}:merge`], "the observed review label blocks nothing");
+  assert.deepEqual((await row(OBSERVED)).merge_decision!.observed, [{ gate: "review_label", reasons: ['The issue has the "review" label.'] }]);
+  assert.deepEqual(await gateRows(), [observedRow("h1")], "and is audited with the gate and the head");
+  assert.deepEqual(await decideMerges({ only: [OBSERVED], now: at(31) + RECHECK_MS + 1, gates: observeLabel }), [], "a re-read decides the same");
+  assert.deepEqual(await gateRows(), [observedRow("h1")], "and doesn't audit the same head again");
+  heads.set(prUrl(10), "h2");
+  await verified(OBSERVED, "h2");
+  assert.deepEqual(await decideMerges({ only: [OBSERVED], now: at(31) + RECHECK_MS + 2, gates: observeLabel }), [`${OBSERVED}:merge`]);
+  assert.deepEqual(await gateRows(), [observedRow("h1"), observedRow("h2")], "a new head is audited again");
+  assert.deepEqual(await decideMerges({ only: [OBSERVED], now: at(31) + 2 * RECHECK_MS + 3 }), [`${OBSERVED}:handover`], "enforced, the same label hands over");
+  assert.deepEqual((await row(OBSERVED)).merge_decision!.reasons, ['The issue has the "review" label.']);
+  assert.equal((await row(OBSERVED)).merge_decision!.observed, undefined);
+  assert.deepEqual(
+    await decideMerges({ only: [OBSERVED], now: at(31) + 3 * RECHECK_MS + 4, gates: { ...GATE_ROLLOUT, review_label: "off" } }),
+    [`${OBSERVED}:merge`],
+    "off, it isn't evaluated",
+  );
+  assert.deepEqual(await gateRows(), [observedRow("h1"), observedRow("h2")], "neither enforce nor off writes an observed row");
 
   // Autonomy and a new report both force a fresh decision.
   checks = "success";
