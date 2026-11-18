@@ -103,6 +103,7 @@ async function main() {
   const passed = checks.filter((c) => c.passed).length;
   const ok = clean && checks.length > 0 && passed === checks.length;
   say(ok ? `verified at ${shortSha(sha)} · ${passed}/${checks.length} checks` : `not verified at ${shortSha(sha)} · ${passed}/${checks.length} checks passed${clean ? "" : " · uncommitted changes"}`);
+  say(`commit trailer: Verified: ${ok ? `factory-verify ${shortSha(sha)} ${passed}/${checks.length}` : "none"}`);
 
   const identity = mcpIdentity(process.env, top);
   const attempt = parseBranch(identity?.branch)?.attempt;
